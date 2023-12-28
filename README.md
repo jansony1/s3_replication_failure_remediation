@@ -33,7 +33,18 @@ This architecture mainly consists of two parts: 1. the capture and storage of fa
 
 ## Deploy
 
+{
+  "ReplicationRuleId": "zy-replication-test",
+  "SourceBucket": "zhenyu-replication-source"
+}
+
 
 ## Conclusion
 
 The entire process is designed to ensure that any replication failures are captured, logged, and then reprocessed to maintain data consistency across S3 buckets. It emphasizes automation, monitoring, and reliability in the data replication process.
+
+
+### 备忘录
+1.replication_rule 能够打散数据，但是不会
+2.如果要复制的对象不存在，那么会出现复制任务一直是active状态，无任何状态的卡住状态
+3.sqs要显示指定，哪个S3能够把消息传递过来

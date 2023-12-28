@@ -1,0 +1,93 @@
+
+# Delete DDB records
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::source-zhenyu/*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:BatchWriteItem",
+                "dynamodb:DeleteItem"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:us-west-2:269562551342:table/s3_replication_records"
+            ]
+        }
+    ]
+}
+
+# Check Staus
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:DescribeJob"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+
+
+## ProcessAndStartCopy
+# account_id  269562551342
+# bucket_name source-zhenyu
+# replication_role    arn:aws:iam::269562551342:role/s3_batch_replication
+# replication_rule    zy-replication-test
+# src_bucket  zhenyu-replication-source
+# table_name  s3_replication_records
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::source-zhenyu/*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:Query"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:us-west-2:269562551342:table/s3_replication_records"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:CreateJob"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": [
+                "arn:aws:logs:us-west-2:269562551342:*"
+            ]
+        }
+    ]
+}

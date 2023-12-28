@@ -1,0 +1,69 @@
+{
+            "Comment": "A Step Function state machine that handles the entire process including passing specific parameters between states.",
+            "StartAt": "ProcessAndStartCopy",
+            "States": {
+              "ProcessAndStartCopy": {
+                "Type": "Task",
+                "Resource": "${ProcessAndStartCopyFunction.Arn}",
+                "ResultPath": "$",
+                "Next": "CheckCopyStatus",
+                "Catch": [
+                  {
+                    "ErrorEquals": [
+                      "States.TaskFailed"
+                    ],
+                    "ResultPath": "$.errorInfo",
+                    "Next": "JobFailed"
+                  }
+                ]
+              },
+              "CheckCopyStatus": {
+                "Type": "Task",
+                "Resource": "${CheckCopyStatusFunction.Arn}",
+                "InputPath": "$",
+                "ResultPath": "$.CopyStatusResult",
+                "Next": "IsCopySuccessful"
+              },
+              "IsCopySuccessful": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.CopyStatusResult.CopyStatus",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "DeleteDynamoDBRecords"
+                  },
+                  {
+                    "Variable": "$.CopyStatusResult.CopyStatus",
+                    "StringEquals": "FAILED",
+                    "Next": "JobFailed"
+                  }
+                ],
+                "Default": "WaitAndCheckAgain"
+              },
+              "WaitAndCheckAgain": {
+                "Type": "Wait",
+                "Seconds": 10,
+                "Next": "CheckCopyStatus"
+              },
+              "DeleteDynamoDBRecords": {
+                "Type": "Task",
+                "Resource": "${DeleteDynamoDBRecordsFunction.Arn}",
+                "InputPath": "$",
+                "End": true,
+                "Catch": [
+                  {
+                    "ErrorEquals": [
+                      "States.TaskFailed"
+                    ],
+                    "ResultPath": "$.errorInfo",
+                    "Next": "JobFailed"
+                  }
+                ]
+              },
+              "JobFailed": {
+                "Type": "Fail",
+                "Cause": "States.TaskFailed",
+                "Error": "See errorInfo for the failed step"
+              }
+            }
+          }

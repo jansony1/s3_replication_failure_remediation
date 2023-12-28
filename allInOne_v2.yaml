@@ -1,0 +1,774 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  Region:
+    Type: String
+    Description: Target Region
+    Default: us-west-2
+  CSVBucket:
+    Type: String
+    Description: S3 bucket to store objects to be deleted
+  AccountId:
+    Type: String
+    Description: Deployed Account ID
+  DDBTable:
+    Type: String
+    Description: DDB table for failed replicated objects
+Resources:
+  ReplicationQueue:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: "ReplicationFailureQueue"
+      VisibilityTimeout: 600
+  ReplicationQueueMyQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ReplicationQueue  # Reference to your SQS queue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: "__default_policy_ID"
+        Statement:
+          - Sid: "__owner_statement"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AccountId}:root"
+            Action: "SQS:*"
+            Resource: !GetAtt ReplicationQueue.Arn
+          - Sid: "example-statement-ID"
+            Effect: "Allow"
+            Principal:
+              Service: "s3.amazonaws.com"
+            Action: "SQS:SendMessage"
+            Resource: !GetAtt ReplicationQueue.Arn
+            Condition:
+              StringEquals: 
+                "aws:SourceAccount": !Sub ${AccountId}
+  S3ReplicationFailureTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref DDBTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'ReplicationRuleId'
+          AttributeType: 'S'
+        - AttributeName: 'ObjectKeyVersionId'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'ReplicationRuleId'
+          KeyType: 'HASH'
+        - AttributeName: 'ObjectKeyVersionId'
+          KeyType: 'RANGE'
+
+  FailureIngestionLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt FailureIngestionLambdaRole.Arn
+      Code: 
+        ZipFile: |
+          import json
+          import boto3
+          import random
+          import os
+
+           # Initialize the DynamoDB client
+          dynamodb = boto3.resource('dynamodb')
+          # Specify your DynamoDB table name
+          table_name = os.environ['table_name']
+          table = dynamodb.Table(table_name)
+
+          def lambda_handler(event, context):
+              print(event)
+              total = 0
+              sqs_records = event.get('Records',{})
+              for sqs_record in sqs_records:
+
+                  message_body_str = sqs_record.get('body',{})
+                  message_body = json.loads(message_body_str)
+                  #print("message_body:"+ message_body_str)
+                  event_record = message_body.get('Records',[])
+                  #print("event_records:"+ json.dumps(event_record))
+                  
+                  if not event_record:
+                      continue
+
+                  record = event_record[0]
+                  # Get necessary info for records ingestion.
+                  s3_info = record.get('s3', {})
+                  replication_event_data = record.get('replicationEventData', {})
+                  # Extract the necessary information
+                  src_bucket_name = s3_info.get('bucket', {}).get('name')
+                  object_info = s3_info.get('object', {})
+                  object_key = object_info.get('key')
+                  versionId = object_info.get('versionId')
+                  replication_rule_id = replication_event_data.get('replicationRuleId')
+                  failure_reason = replication_event_data.get('failureReason')
+                  dst_bucket_arn = replication_event_data.get('destinationBucket')
+
+                  parts = dst_bucket_arn.split(':')
+                  dst_bucket_name = parts[-1]
+
+                  
+                  # Keep Version infor
+                  object_key_with_version = object_key +"#"+ versionId
+                  
+                  # Create an item to insert into DynamoDB
+                  item = {
+                      'ReplicationRuleId': replication_rule_id,
+                      'ObjectKeyVersionId': object_key_with_version,
+                      'SRCBucketName': src_bucket_name,
+                      'DSTBucketName' : dst_bucket_name,
+                      'FailureReason': failure_reason
+                  }
+
+                  # Optionally add other object attributes like size, etag, etc.
+                  item.update({
+                      'ObjectSize': object_info.get('size'),
+                      'ETag': object_info.get('eTag'),
+                      'VersionId': object_info.get('versionId')
+                  })
+
+                  # Write the item to the DynamoDB table
+                  table.put_item(Item=item)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Records ingested into DynamoDB successfully')
+              }
+    
+      Runtime: python3.12
+      Timeout: 600
+      Environment:
+        Variables:
+          table_name: !Ref DDBTable
+  FailureIngestionLambdaEventSourceMapping:
+    Type: "AWS::Lambda::EventSourceMapping"
+    Properties:
+      BatchSize: 10  # 一次处理的消息数量，可以根据需求调整
+      EventSourceArn: !GetAtt ReplicationQueue.Arn  # SQS 队列的 ARN
+      FunctionName: !GetAtt FailureIngestionLambda.Arn  # Lambda 函数的 ARN
+
+  FailureIngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Sub arn:aws:dynamodb:${Region}:${AccountId}:table/${DDBTable}
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ReplicationQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${Region}:${AccountId}:log-group:/aws/lambda/*
+
+  ProcessAndStartCopyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt ProcessAndStartCopyRole.Arn
+      Runtime: python3.12
+      Timeout: 600
+      Environment:
+        Variables:
+          region: !Ref Region
+          table_name: !Ref DDBTable
+          csv_bucket: !Ref CSVBucket
+          account_id: !Ref AccountId
+          replication_role: !GetAtt BatchReplicationJobRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import csv
+          import os
+          import json
+          import time
+          from io import StringIO
+          from botocore.exceptions import ClientError
+          import logging
+          import boto3
+
+          # Configure logger
+          logger = logging.getLogger()
+          logger.setLevel(logging.ERROR)
+
+          # Initialize boto3 clients for DynamoDB and S3
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          # For batch replication
+          s3_control_client = boto3.client('s3control')
+
+          # Change below parameters, when invoke lambda via env overide
+          table_name = os.environ['table_name']
+          csv_bucket = os.environ['csv_bucket']
+          account_id = os.environ['account_id']
+          replication_role =  os.environ['replication_role']
+          #replication_rule = os.environ['replication_rule']
+
+
+          def one_time_batch(target_file_lists, etag, error_occurred, error_reason):
+
+              try:
+                  response = s3_control_client.create_job(
+                      AccountId=account_id,
+                      Operation={
+                          'S3ReplicateObject': {}
+                      },
+                      Report={
+                          'Bucket': 'arn:aws:s3:::' + csv_bucket,
+                          'Format': 'Report_CSV_20180820',
+                          'Enabled': True,
+                          'Prefix': 'report/',
+                          'ReportScope': 'AllTasks'
+                      },
+                      Manifest={
+                          'Spec': {
+                              'Format': 'S3BatchOperations_CSV_20180820',
+                              'Fields': ['Bucket', 'Key', 'VersionId']
+                          },
+                          'Location': {
+                              'ObjectArn': 'arn:aws:s3:::'+ csv_bucket+'/'+ target_file_lists,
+                              'ETag': etag
+                          }
+                      },
+                      Priority=10,
+                      ConfirmationRequired=False,
+                      RoleArn=replication_role
+                  )
+
+                  # Handle response or further processing here
+                  print("Job created successfully: ", response)
+
+                  return  response['JobId']
+              except ClientError as e:
+                  # Handle AWS client errors (e.g., service errors or issues with request)
+                  print("AWS ClientError occurred: ", e)
+                  error_occurred = True
+                  error_reason= e 
+              except Exception as e:
+                  # Handle other exceptions such as coding errors
+                  print("An error occurred: ", e)
+                  error_occurred = True
+                  error_reason= e 
+
+              
+
+          def lambda_handler(event, context):
+              error_occurred = False  # Flag to track if an error occurred
+              error_reason = ''
+              
+              replication_rule = event.get('ReplicationRuleId')
+              src_bucket = event.get('SourceBucket')
+
+
+
+              # Reference to your DynamoDB table
+              table = dynamodb.Table(table_name)
+
+              # 初始化存储所有查询结果的列表
+              all_items = []
+              
+
+              # Query the table
+              kwargs = {
+                  'KeyConditionExpression': 'ReplicationRuleId = :id',
+                  'ExpressionAttributeValues': {':id': replication_rule},
+                  'ProjectionExpression': 'ReplicationRuleId, ObjectKeyVersionId'
+              }
+              
+              while True:
+                  #paginate automatically up to 1MB
+                  try:
+                      response = table.query(**kwargs)
+                  except Exception as e:
+                      logger.error(f"DynamoDB query: {e}")
+                      raise e
+                  
+                  items = response.get('Items', [])
+                  print("items are: " + json.dumps(items))
+                  if not items:
+                      break
+                  
+                  all_items.extend(items)
+                      
+                  last_key = response.get('LastEvaluatedKey')
+                  if not last_key:
+                      break
+              
+                  kwargs['ExclusiveStartKey'] = last_key
+                      
+              
+              # Create a CSV file in memory
+              csv_file = StringIO()
+              writer = csv.writer(csv_file)
+
+               # Create items list and store to s3 for delete due to Step Function 256K limitaion.
+              to_delete_csv = StringIO()
+              to_delete_writer = csv.writer(to_delete_csv)
+
+
+              # Set for duplicate data manipulation
+              unique_rows_csv = set()
+              unique_rows_to_delete_csv = set()
+
+              
+              # Write the data rows
+              for item in all_items:
+                  object_key, version_id = item.get('ObjectKeyVersionId', '').split('#', 1)
+                  unique_rows_csv.add((src_bucket, object_key, version_id))
+                  unique_rows_to_delete_csv.add((item.get('ReplicationRuleId', ''), item.get('ObjectKeyVersionId', '')))
+              
+             
+              # Ingest data to CSV
+              for row in unique_rows_csv:
+                  writer.writerow(row)
+
+              # Ingest data to CSV
+              for row in unique_rows_to_delete_csv:
+                  to_delete_writer.writerow(row)
+              
+              # Reset the file pointer to the beginning
+              csv_file.seek(0)  
+              to_delete_csv.seek(0)
+              
+              # Define the S3 bucket and the file name where the CSV will be stored
+              s3_file_key = replication_rule + ".csv"
+
+              # Define the S3 bucket and the file name where the CSV will be used for DDB deletion
+              s3_file_key_to_delete = replication_rule +"_delete"+".csv"
+              
+              # Upload the CSV file to S3
+
+              try:
+              # First put_object call
+                  s3_response = s3.put_object(Bucket=csv_bucket, Key=s3_file_key, Body=csv_file.getvalue())
+                  etag = s3_response.get('ETag')
+
+                  print("CSV file upload successfully: ", s3_response)
+
+                  # Second put_object call
+                  s3_to_delete_response = s3.put_object(Bucket=csv_bucket, Key=s3_file_key_to_delete, Body=to_delete_csv.getvalue())
+
+                  print("To be deleted ddb object list uploaded successfully: ", s3_to_delete_response)
+
+              except ClientError as e:
+                  # Handle AWS client errors
+                  print("AWS ClientError occurred: ", e)
+                  error_occurred = True
+                  error_reason= e 
+              except Exception as e:
+                  # Handle other exceptions
+                  print("An error occurred: ", e)
+                  error_occurred = True
+                  error_reason= e 
+
+
+
+
+              # Report Generation
+              job_id = one_time_batch(s3_file_key,etag, error_occurred, error_reason )
+              
+              # Check if an error occurred and return an error response
+              if error_occurred:
+                  return {
+                      "statusCode": 400,
+                      "body": json.dumps(f' An error occurred during the Lambda execution due to {error_reason}')
+                  }
+
+
+              response = {
+                  "statusCode": 200,
+                  "s3_bucket": csv_bucket,
+                  "job_id": job_id,
+                  "account_id": account_id,
+                  "table_name": table_name,
+                  "s3_file_key_to_delete": s3_file_key_to_delete,
+                  'body': json.dumps(f' ontime batch for replication id {replication_rule} success' )
+              }
+
+              return response
+
+  ProcessAndStartCopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProcessAndStartCopyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::${CSVBucket}/*'
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:Query'
+                Resource: !Sub 'arn:aws:dynamodb:${Region}:${AccountId}:table/${DDBTable}'
+              - Effect: Allow
+                Action:
+                  - 's3:CreateJob'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: !GetAtt  BatchReplicationJobRole.Arn
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': 's3.amazonaws.com'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${Region}:${AccountId}:*'
+
+  CheckCopyStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CheckCopyStatusRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          # Initialize the S3 Control client
+          s3_control_client = boto3.client('s3control')
+
+          def lambda_handler(event, context):
+              job_id = event.get("job_id")
+              s3_bucket = event.get("s3_bucket")
+              s3_file_key_to_delete = event.get('s3_file_key_to_delete')
+
+              account_id = event.get("account_id")  # Replace with a constant if necessary
+
+              # Get the job response from S3 Control
+              job_response = s3_control_client.describe_job(
+                  AccountId=account_id,
+                  JobId=job_id
+              )
+
+              # Extract status and number of failed tasks
+              status = job_response['Job']['Status']
+              failed_task = job_response['Job']['ProgressSummary']['NumberOfTasksFailed']
+
+              # Determine the job status
+              if status == 'Complete' and failed_task == 0:
+                  job_status = 'SUCCEEDED'
+              elif status == 'Failed' or failed_task != 0:
+                  job_status = 'FAILED' 
+              else:
+                  print("Job is still processing. Current status: " + status)
+                  job_status = 'ongoing'
+              
+              # Return the job status
+              return {
+                  "CopyStatus": job_status
+              }
+
+  CheckCopyStatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CheckCopyStatusPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:DescribeJob
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${Region}:${AccountId}:*'
+
+          
+  DeleteDynamoDBRecordsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt DeleteDynamoDBRecordsRole.Arn
+      Runtime: python3.12
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import csv
+          from io import StringIO
+
+          # Initialize boto3 clients for DynamoDB and S3
+          dynamodb = boto3.resource('dynamodb')
+          s3_client = boto3.client('s3')
+
+          # Ensure these environment variables are defined in your Lambda configuration
+
+          def delete_batch(items_to_delete, table_name):
+              table = dynamodb.Table(table_name)
+              with table.batch_writer() as batch:
+                  for key in items_to_delete:
+                      batch.delete_item(Key=key)
+
+          def lambda_handler(event, context):
+              # Ensure these are passed in the event
+              s3_bucket = event.get("s3_bucket")
+              s3_file_key_to_delete = event.get('s3_file_key_to_delete')
+              table_name = event.get('table_name')
+
+              all_items = []  # Define all_items outside the try block
+
+              try:
+                  # Get the object from S3
+                  s3_object = s3_client.get_object(Bucket=s3_bucket, Key=s3_file_key_to_delete)
+                  s3_file_content = s3_object['Body'].read().decode('utf-8')
+                  
+                  # Read the CSV content
+                  csv_file = StringIO(s3_file_content)
+                  reader = csv.reader(csv_file)
+
+                  # Skip the header if your CSV has one
+                  # next(reader, None)  # Uncomment this line if your CSV has a header
+
+                  # Read each row in the CSV file
+                  for row in reader:
+                      item = {
+                          'ReplicationRuleId': row[0],  # Adjust index based on your CSV format
+                          'ObjectKeyVersionId': row[1]  # Adjust index based on your CSV format
+                      }
+                      all_items.append(item)
+              
+              except Exception as e:
+                  print(f"Error reading from S3: {e}")
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps(f'Error reading from S3: {e}')
+                  }
+
+              # Only call delete_batch if all_items is not empty
+              if all_items:
+                  delete_batch(all_items, table_name)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('delete all records succeed')
+              }
+
+  DeleteDynamoDBRecordsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeleteDynamoDBRecordsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: !Sub "arn:aws:dynamodb:${Region}:${AccountId}:table/${DDBTable}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${CSVBucket}/*"
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${Region}:${AccountId}:*'
+             
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ProcessAndStartCopyFunction.Arn
+                  - !GetAtt CheckCopyStatusFunction.Arn
+                  - !GetAtt DeleteDynamoDBRecordsFunction.Arn
+
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString:
+        !Sub |
+          {
+            "Comment": "A Step Function state machine that handles the entire process including passing specific parameters between states.",
+            "StartAt": "ProcessAndStartCopy",
+            "States": {
+              "ProcessAndStartCopy": {
+                "Type": "Task",
+                "Resource": "${ProcessAndStartCopyFunction.Arn}",
+                "ResultPath": "$",
+                "Next": "CheckCopyStatus",
+                "Catch": [
+                  {
+                    "ErrorEquals": [
+                      "States.TaskFailed"
+                    ],
+                    "ResultPath": "$.errorInfo",
+                    "Next": "JobFailed"
+                  }
+                ]
+              },
+              "CheckCopyStatus": {
+                "Type": "Task",
+                "Resource": "${CheckCopyStatusFunction.Arn}",
+                "InputPath": "$",
+                "ResultPath": "$.CopyStatusResult",
+                "Next": "IsCopySuccessful"
+              },
+              "IsCopySuccessful": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.CopyStatusResult.CopyStatus",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "DeleteDynamoDBRecords"
+                  },
+                  {
+                    "Variable": "$.CopyStatusResult.CopyStatus",
+                    "StringEquals": "FAILED",
+                    "Next": "JobFailed"
+                  }
+                ],
+                "Default": "WaitAndCheckAgain"
+              },
+              "WaitAndCheckAgain": {
+                "Type": "Wait",
+                "Seconds": 10,
+                "Next": "CheckCopyStatus"
+              },
+              "DeleteDynamoDBRecords": {
+                "Type": "Task",
+                "Resource": "${DeleteDynamoDBRecordsFunction.Arn}",
+                "InputPath": "$",
+                "End": true,
+                "Catch": [
+                  {
+                    "ErrorEquals": [
+                      "States.TaskFailed"
+                    ],
+                    "ResultPath": "$.errorInfo",
+                    "Next": "JobFailed"
+                  }
+                ]
+              },
+              "JobFailed": {
+                "Type": "Fail",
+                "Cause": "States.TaskFailed",
+                "Error": "See errorInfo for the failed step"
+              }
+            }
+          }
+
+  BatchReplicationJobRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "batchoperations.s3.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "MyIAMPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:InitiateReplication"
+                Resource: 
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                Resource: 
+                  - !Sub "arn:aws:s3:::${CSVBucket}/*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource: 
+                  - !Sub "arn:aws:s3:::${CSVBucket}/*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetReplicationConfiguration"
+                  - "s3:PutInventoryConfiguration"
+                Resource: 
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource: 
+                  - !Sub "arn:aws:s3:::${CSVBucket}/*"
+
+Outputs:
+  ReplicationQueueURL:
+    Description: "URL of the replication queue"
+    Value: !Ref ReplicationQueue
+  StepFunctionsArn:
+    Description: "Arn of step function"
+    Value: !GetAtt MyStateMachine.Arn
