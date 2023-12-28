@@ -102,7 +102,7 @@ aws stepfunctions start-execution \
     --name "ExecutionName" \
     --input '{"ReplicationRuleId": <TargetRule>, "SourceBucket": <TargetSourceBucket>}'
 ```
-4. After the execution, one can either query DDB table based on ReplicationRule or using 
+4. After the execution, one can either query DDB table based on ReplicationRule or using yiyang's solution
 
 ## Conclusion
 
