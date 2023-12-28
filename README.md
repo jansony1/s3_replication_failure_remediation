@@ -1,50 +1,115 @@
 # s3_replication_failure_remediation
 
 ## General Introduction
-We know that many customers configure S3 replication rules when using Amazon S3 to achieve data redundancy for DR (Disaster Recovery) purposes. In practice, we understand that replication based on S3 can fail due to various issues such as permissions, network jitter, etc. Since S3 replication itself does not have explicit retry rules, how to implement a fallback synchronization solution when such events occur has become a challenge for many customers. This article proposes a relatively timely and easy-to-query contingency plan
+Amazon S3 users often configure S3 replication rules for data redundancy in Disaster Recovery (DR) scenarios. However, replication may fail due to issues like permission errors or network jitters. Without explicit retry rules in S3 replication, finding a fallback synchronization solution for such failures is challenging. This article presents a timely and easily queryable contingency plan.
 
-This document outlines the process flow for handling replication failure events in Amazon S3 and the subsequent batch replication process.
+This site details the remediation process for handling Amazon S3 replication failure events and subsequent batch replication 
 
 ## Architecture Introduction
 
-This architecture mainly consists of two parts: 1. the capture and storage of failure events(In Red), and 2. Failure querying based on replication and handling of subsequent batch replication(In Blue).
+The architecture comprises two parts: 1. Capturing and storing failure events (Red), and 2. Querying failures based on replication rule and handling batch replication for remediation (Blue).
 
 ![S3 Replication Workflow Diagram](./images/flow.png)
 
-#### 1. Replication Failure Event Ingestion and storage
+#### Step 1. Replication Failure Event automatically Ingestion and storage
 
-* **1.1 Replication Failure Events Ingestion**: Replication failures from the Source (SRC) Bucket are ingested into an SQS queue which acts as a decoupling buffer.
-
+* **1.1 Replication Failure Events Ingestion**: Source Bucket's replication failures events are ingested into an SQS queue
 * **1.2 Event/Object Handling with Lambda**: Lambda function is triggered to batch poll events from the SQS queue.
-* **1.3 Ingest Failure Event**: The Lambda function ingests failure events and stores the details in a 'Failure Object store' based on the `replication_rule`.
+* **1.3 Ingest Failure Event**: Lambda function stores failure object in a 'Failure Object Store' per `replication_rule`.
+#### Step 2. Querying Failures and Batch Replication Handling
 
-#### 2. Failure querying based on replication and handling of subsequent batch replication
+* **2.0 Query Events Based on Replication_Rule**: Users query the failure events based on the `replication_rule`.
+* **2.1 Kick off Batch Replication Job Based on Replication_Rule**: The Command Center initiates a batch replication job based on the  `replication_rule`.
+* **2.2 Fetch replication failure objects based on Replication_Rule and S3 Source**:   A Lambda function retrieves failure objects by the given  `replication_rule`.
+* **2.3 Store Object List in CSV**: Object lists are stored in CSV in the designated Bucket.
+* **2.4 Generate Batch Replication Job**: A batch replication job is generated to handle the replication of the objects.
+* **2.5 S3 Batch Replication Activation**: The S3 Batch Replication is activated, executing the batch job to replicate objects to the Destination (DST) Bucket.
+* **2.6 Data Replication with and without RTC**: Data is replicated without RTC
+* **2.7 Delete replicated Objects**: After all data was replicated succesfully, delete related records in Dynamodb
 
-* **2.0 Query Events Based on Replication_Rule**: Users can query the failure events based on the `replication_rule`.
-* **2.1 Kick off Batch Replication Job Based on Replication_Rule**: The Command Center initiates batch replication job based on the specific `replication_rule`.
+The entire flow could work in normal condition However, through analysis, we found several potential issues in Step 2 of the aforementioned design:
+* All logic is within a single Lambda, hindering task execution observation and maintenance.
+* Lambda's 15-minute runtime limit might not accommodate large-scale replication tasks.
 
-* **2.2 CSV Storage and Batch Replication Job Generation**:  Lambda function retrieves all failure events for the given `replication_rule`.
-* **2.3 Store Object List in CSV**: The object list is then stored in CSV format in the designated Bucket for CSV.
-* **2.4 Generate Batch Replication Job**: A batch replication job is generated to handle the replication of the data.
+To address these, we leveraged AWS Step Functions to decouple Step 2(Remediation Part)'s logic.
 
-* **2.5 S3 Batch Replication Activation**: The S3 Batch Replication is activated, executing the batch job to replicate data to the Destination (DST) Bucket.
+![S3 Replication with Stepfunction Diagram](./images/stepfunction.png)
 
-* **2.6 Data Replication with and without RTC**: Batch Data Replication without RTC: The data is replicated in batches without real-time consistency (RTC) to the DST Bucket.
+In the optimized architecture, we utilized AWS Step Functions to:
+* SDivide the Lambda function into three distinct parts: object list generation, task status monitoring, and failure record remova(**Task complete with no failed replication objects**) 
 
-## Deploy
+* Leveraged Step Functions' built-in features like conditional checks, loop invocations, and error handling to streamline and manage the workflow.
 
-{
-  "ReplicationRuleId": "zy-replication-test",
-  "SourceBucket": "zhenyu-replication-source"
-}
+## Deploy and configuration
+### Prerequisites and Illustration
+* Install latest [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+* Have an S3 Bucket for temporary file storage.
+* Ensure sufficient permissions for CloudFormation deployment, Step Functions invocation, and S3 Event configuration
 
+
+### Deploy the stack
+Download the template codes
+```
+git clone https://github.com/jansony1/s3_replication_failure_remediation.git 
+```
+Deploy Cloudformation with customized input
+```
+aws cloudformation create-stack \
+  --stack-name [YourStackName] \
+  --template-body file://allInOne_v2.yaml \
+  --parameters \
+      ParameterKey=AccountId,ParameterValue=[YourAccountId] \
+      ParameterKey=CSVBucket,ParameterValue=[YourCSVBucket] \
+      ParameterKey=TableName,ParameterValue=[YourTableName] \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+In above paramters:
+* YourAccountId: Where the stack will be deployed
+* YourCSVBucket: S3 is used to hold the list of  objects awaiting re-replication and its replication results
+* YourTableName: Dynamodb stores information about objects that failed to replicate. 
+
+After the deployment, record the **StepFunction ARN,SQS ARN**, **Dyanmodb Name** from output in any editor. Configure S3 failure event and consumption
+
+```
+aws s3api put-bucket-notification-configuration \
+    --bucket <SOURCE BUCKET> \
+    --notification-configuration '{
+        "QueueConfigurations": [
+            {
+                "QueueArn": <QUEUE ARN FROM LAST STEP>,
+                "Events": ["s3:Replication:OperationFailedReplication"]
+            }
+        ]
+    }'
+
+```
+In above command:
+* SOURCE BUCKET: Any Target Bucket you want to do implmenet this remediation solution
+* QueueArn: Centralized Queue for events buffering and batching 
+
+Till then, the replication failure remediation stack was deployed successfully, one may further explore all the resources in **allInOne_v2.yaml**.
+
+### Experiments.
+Just as describe in architecture charpter, the experiments follow should be:
+
+1. Simulate S3 replication failure with permission deny from Destination Bucket or leverage latest AWS FIS for [S3 experiments](https://docs.aws.amazon.com/fis/latest/userguide/fis-actions-reference.html#s3-actions-reference-fis).
+2. After that, customer may scan/query the Dyanmodb table for failure reason based on ReplicationRule.
+3. Once the failure cause was resolved, it is the time to execute below command for replication remediation based on **ReplicationRule** and **SourceBucket**.
+
+```
+aws stepfunctions start-execution \
+    --state-machine-arn "arn:aws:states:region:account-id:stateMachine:yourStateMachineName" \
+    --name "ExecutionName" \
+    --input '{"ReplicationRuleId": <TargetRule>, "SourceBucket": <TargetSourceBucket>}'
+```
+4. After the execution, one can either query DDB table based on ReplicationRule or using 
 
 ## Conclusion
 
-The entire process is designed to ensure that any replication failures are captured, logged, and then reprocessed to maintain data consistency across S3 buckets. It emphasizes automation, monitoring, and reliability in the data replication process.
+This solution ensures replication failures are efficiently managed, maintaining data consistency across S3 buckets. The focus is on automation, monitoring, and the reliability of the replication process
 
+## Next Action
+1.More experiements to measure the end-to-end time consumption in relation to different counts of failure event
 
-### 备忘录
-1.replication_rule 能够打散数据，但是不会
-2.如果要复制的对象不存在，那么会出现复制任务一直是active状态，无任何状态的卡住状态
-3.sqs要显示指定，哪个S3能够把消息传递过来
+2. Step function may hung in execution with no errors due to failed object was already recorded in DynamoDB and the corresponding data in the original bucket was deleted before step function kick start. 
+

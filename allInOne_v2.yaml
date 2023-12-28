@@ -766,9 +766,9 @@ Resources:
                   - !Sub "arn:aws:s3:::${CSVBucket}/*"
 
 Outputs:
-  ReplicationQueueURL:
+  ReplicationQueueArn:
     Description: "URL of the replication queue"
-    Value: !Ref ReplicationQueue
+    Value: !GetAtt ReplicationQueue.Arn
   StepFunctionsArn:
     Description: "Arn of step function"
     Value: !GetAtt MyStateMachine.Arn
