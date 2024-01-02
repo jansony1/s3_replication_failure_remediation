@@ -60,7 +60,7 @@ aws cloudformation create-stack \
   --parameters \
       ParameterKey=AccountId,ParameterValue=[YourAccountId] \
       ParameterKey=CSVBucket,ParameterValue=[YourCSVBucket] \
-      ParameterKey=TableName,ParameterValue=[YourTableName] \
+      ParameterKey=DDBTable,ParameterValue=[YourTableName] \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 In above paramters:
