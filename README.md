@@ -36,14 +36,14 @@ To address these, we leveraged AWS Step Functions to decouple Step 2(Remediation
 ![S3 Replication with Stepfunction Diagram](./images/stepfunction.png)
 
 In the optimized architecture, we utilized AWS Step Functions to:
-* SDivide the Lambda function into three distinct parts: object list generation, task status monitoring, and failure record remova(**Task complete with no failed replication objects**) 
+* Divide the Lambda function into three distinct parts: object list generation, task status monitoring, and failure record remova(**Task complete with no failed replication objects**) 
 
 * Leveraged Step Functions' built-in features like conditional checks, loop invocations, and error handling to streamline and manage the workflow.
 
 ## Deploy and configuration
 ### Prerequisites and Illustration
 * Install latest [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-* Have an S3 Bucket for temporary file storage.
+* Have an S3 Bucket for temporary file storage. It will be used as <YourCSVBucket>
 * Ensure sufficient permissions for CloudFormation deployment, Step Functions invocation, and S3 Event configuration
 
 
@@ -94,11 +94,11 @@ Just as describe in architecture charpter, the experiments follow should be:
 
 1. Simulate S3 replication failure with permission deny from Destination Bucket or leverage latest AWS FIS for [S3 experiments](https://docs.aws.amazon.com/fis/latest/userguide/fis-actions-reference.html#s3-actions-reference-fis).
 2. After that, customer may scan/query the Dyanmodb table for failure reason based on ReplicationRule.
-3. Once the failure cause was resolved, it is the time to execute below command for replication remediation based on **ReplicationRule** and **SourceBucket**.
+3. Once the failure cause was resolved, it is the time to execute below command for replication remediation based on **ReplicationRule** and **SourceBucket**. Please remember to replace <State Machine ARN>  with the StepFunction ARN from last step
 
 ```
 aws stepfunctions start-execution \
-    --state-machine-arn "arn:aws:states:region:account-id:stateMachine:yourStateMachineName" \
+    --state-machine-arn <State Machine ARN> \
     --name "ExecutionName" \
     --input '{"ReplicationRuleId": <TargetRule>, "SourceBucket": <TargetSourceBucket>}'
 ```
