@@ -94,7 +94,7 @@ Just as describe in architecture charpter, the experiments follow should be:
 
 1. Simulate S3 replication failure with permission deny from Destination Bucket or leverage latest AWS FIS for [S3 experiments](https://docs.aws.amazon.com/fis/latest/userguide/fis-actions-reference.html#s3-actions-reference-fis).
 2. After that, customer may scan/query the Dyanmodb table for failure reason based on ReplicationRule.
-3. Once the failure cause was resolved, it is the time to execute below command for replication remediation based on **ReplicationRule** and **SourceBucket**. Please remember to replace <State Machine ARN>  with the StepFunction ARN from last step
+3. Once the failure cause was resolved, it is the time to execute below command for replication remediation based on **ReplicationRule** and **SourceBucket**. Please remember to replace <State Machine ARN>  with the **StepFunction ARN** from last step
 
 ```
 aws stepfunctions start-execution \
@@ -109,7 +109,7 @@ aws stepfunctions start-execution \
 This solution ensures replication failures are efficiently managed, maintaining data consistency across S3 buckets. The focus is on automation, monitoring, and the reliability of the replication process
 
 ## Next Action
-1.More experiements to measure the end-to-end time consumption in relation to different counts of failure event
+1. More experiements to measure the end-to-end time consumption in relation to different counts of failure event
 
 2. Step function may hung in execution with no errors due to failed object was already recorded in DynamoDB and the corresponding data in the original bucket was deleted before step function kick start. 
 
