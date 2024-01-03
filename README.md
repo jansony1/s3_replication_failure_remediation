@@ -62,11 +62,18 @@ aws cloudformation create-stack \
       ParameterKey=CSVBucket,ParameterValue=[YourCSVBucket] \
       ParameterKey=DDBTable,ParameterValue=[YourTableName] \
   --capabilities CAPABILITY_NAMED_IAM
+
+# Wait for the stack to be created
+aws cloudformation wait stack-create-complete --stack-name s3-events-handler
+
+# Get the stack outputs
+aws cloudformation describe-stacks --stack-name s3-events-handler --query "Stacks[0].Outputs"
 ```
 In above paramters:
 * YourAccountId: Where the stack will be deployed
-* YourCSVBucket: S3 is used to hold the list of  objects awaiting re-replication and its replication results
-* YourTableName: Dynamodb stores information about objects that failed to replicate. 
+* YourCSVBucket: S3 is used to hold the list of  objects awaiting re-replication and its replication results(Create before the stack)
+* YourTableName: Dynamodb stores information about objects that failed to replicate. (Generate by the stack)
+
 
 After the deployment, record the **StepFunction ARN,SQS ARN**, **Dyanmodb Name** from output in any editor. Configure S3 failure event and consumption
 
