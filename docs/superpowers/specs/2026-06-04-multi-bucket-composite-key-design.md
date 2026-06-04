@@ -158,8 +158,10 @@ New / updated tests in `tests/test_remediation.py`:
   record's `SRCBucketName`, not the execution input.
 - `test_csv_object_keys_are_bucket_rule_scoped` — the S3 manifest / delete-list
   object keys include the bucket, so two buckets sharing a rule ID don't collide.
-- `test_delete_uses_composite_key` — to_delete CSV / delete step address
-  `BucketRuleKey`, not `ReplicationRuleId`.
+- `test_to_delete_csv_uses_composite_key` — the to_delete CSV first column is
+  `BucketRuleKey`.
+- `test_delete_records_uses_composite_key` — DeleteDynamoDBRecords builds its
+  delete Key with `BucketRuleKey`, not `ReplicationRuleId`.
 - `test_missing_source_bucket_fails_loud` — remediation with missing/empty
   `SourceBucket` or `ReplicationRuleId` raises rather than querying `None|None`.
 - `test_no_cross_bucket_contamination` — two buckets sharing a rule ID: remediating
