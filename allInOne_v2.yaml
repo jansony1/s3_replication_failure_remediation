@@ -481,15 +481,20 @@ Resources:
                   JobId=job_id
               )
 
-              # Extract status and number of failed tasks
+              # Extract status and number of failed tasks. ProgressSummary may be
+              # absent for early states (New/Preparing), so default safely.
               status = job_response['Job']['Status']
-              failed_task = job_response['Job']['ProgressSummary']['NumberOfTasksFailed']
+              progress = job_response['Job'].get('ProgressSummary') or {}
+              failed_task = progress.get('NumberOfTasksFailed', 0)
+
+              # Terminal job states that are not a clean success.
+              terminal_failed = ('Failed', 'Cancelled', 'Cancelling', 'Suspended')
 
               # Determine the job status
               if status == 'Complete' and failed_task == 0:
                   job_status = 'SUCCEEDED'
-              elif status == 'Failed' or failed_task != 0:
-                  job_status = 'FAILED' 
+              elif status in terminal_failed or failed_task != 0:
+                  job_status = 'FAILED'
               else:
                   print("Job is still processing. Current status: " + status)
                   job_status = 'ongoing'

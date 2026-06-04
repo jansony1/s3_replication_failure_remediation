@@ -623,3 +623,45 @@ def test_no_cross_bucket_contamination():
     assert "a-obj" in manifest_body
     assert "b-obj" not in manifest_body          # B never leaks into A's run
     assert "bucket-b" not in manifest_body
+
+
+# ---------------------------------------------------------------------------
+# CheckCopyStatus job-status handling
+# ---------------------------------------------------------------------------
+
+def _run_check_status(job):
+    """Run CheckCopyStatusFunction with a fake describe_job returning `job`."""
+    template = load_template()
+    code = get_lambda_code(template, "CheckCopyStatusFunction")
+    s3control = mock.Mock()
+    s3control.describe_job.return_value = {"Job": job}
+    fake_boto3 = make_fake_boto3(s3control=s3control)
+    module = exec_lambda_module(code, {}, fake_boto3)
+    return module.lambda_handler(
+        {"job_id": "j", "s3_bucket": "b", "account_id": "1",
+         "s3_file_key_to_delete": "d"}, None)
+
+
+def test_check_status_cancelled_is_failed():
+    """A Cancelled/Suspended batch job is terminal-not-successful and must map
+    to FAILED, not 'ongoing' (which would poll until the 24h timeout)."""
+    for terminal in ("Cancelled", "Cancelling", "Suspended"):
+        result = _run_check_status(
+            {"Status": terminal, "ProgressSummary": {"NumberOfTasksFailed": 0}})
+        assert result["CopyStatus"] == "FAILED", f"{terminal} -> {result}"
+
+
+def test_check_status_active_states_still_ongoing():
+    """Genuinely in-progress states keep returning 'ongoing' so the poll loop
+    continues (regression guard for the FAILED mapping)."""
+    for active in ("Active", "Ready"):
+        result = _run_check_status(
+            {"Status": active, "ProgressSummary": {"NumberOfTasksFailed": 0}})
+        assert result["CopyStatus"] == "ongoing", f"{active} -> {result}"
+
+
+def test_check_status_missing_progress_summary_no_keyerror():
+    """Early states (New/Preparing) may lack ProgressSummary; must not KeyError
+    (which would wrongly route to JobFailed)."""
+    result = _run_check_status({"Status": "Preparing"})
+    assert result["CopyStatus"] == "ongoing"
