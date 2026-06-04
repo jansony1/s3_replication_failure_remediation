@@ -299,6 +299,9 @@ Resources:
               replication_rule = event.get('ReplicationRuleId')
               src_bucket = event.get('SourceBucket')
 
+              if not replication_rule or not src_bucket:
+                  raise ValueError("ReplicationRuleId and SourceBucket are required")
+
 
 
               # Reference to your DynamoDB table

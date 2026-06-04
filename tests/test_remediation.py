@@ -569,3 +569,25 @@ def test_delete_records_uses_composite_key():
 
     assert captured["keys"][0] == {"BucketRuleKey": "bucket-a|rule-1",
                                    "ObjectKeyVersionId": "key#v1"}
+
+
+def test_missing_source_bucket_fails_loud():
+    """Missing/empty SourceBucket or ReplicationRuleId raises, rather than
+    building a 'None|None' key and silently querying nothing."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+
+    # Must fail with an explicit, intentional error (ValueError) — not an
+    # incidental TypeError from building a 'None|None' key downstream.
+    with pytest.raises(ValueError):
+        module.lambda_handler({"ReplicationRuleId": "rule-1"}, None)  # no SourceBucket
+    with pytest.raises(ValueError):
+        module.lambda_handler({"SourceBucket": "src-bucket"}, None)   # no rule
+    with pytest.raises(ValueError):
+        module.lambda_handler({"ReplicationRuleId": "", "SourceBucket": ""}, None)  # empty
