@@ -594,6 +594,10 @@ Resources:
 
                   # Read each row in the CSV file
                   for row in reader:
+                      # Skip blank/malformed rows (need both key columns).
+                      if len(row) < 2:
+                          print("Skipping malformed delete row: " + str(row))
+                          continue
                       item = {
                           'BucketRuleKey': row[0],
                           'ObjectKeyVersionId': row[1]

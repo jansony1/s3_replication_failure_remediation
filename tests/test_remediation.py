@@ -705,3 +705,41 @@ def test_state_machine_handles_no_job():
     # job_id must be inspected by a Choice somewhere in the machine.
     asl_text = json.dumps(asl)
     assert "job_id" in asl_text, "state machine never inspects job_id"
+
+
+def test_delete_skips_malformed_csv_rows():
+    """DeleteDynamoDBRecords must skip rows with fewer than 2 columns (blank or
+    malformed lines) instead of raising IndexError and failing the cleanup."""
+    template = load_template()
+    code = get_lambda_code(template, "DeleteDynamoDBRecordsFunction")
+
+    deleted = []
+    class DelTable:
+        def batch_writer(self):
+            class W:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def delete_item(self_, Key): deleted.append(Key)
+            return W()
+
+    class DelResource:
+        def Table(self, n): return DelTable()
+
+    # CSV has a good row, a blank line, and a single-column malformed row.
+    csv_bytes = b"bucket-a|rule-1,key#v1\n\nonlyonecol\nbucket-b|rule-2,key2#v2\n"
+    s3 = mock.Mock()
+    s3.get_object.return_value = {
+        "Body": type("B", (), {"read": lambda self: csv_bytes})()
+    }
+    fake_boto3 = make_fake_boto3(s3=s3, dynamodb_resource=DelResource())
+
+    module = exec_lambda_module(code, {}, fake_boto3)
+    result = module.lambda_handler({"s3_bucket": "csv",
+                                    "s3_file_key_to_delete": "f",
+                                    "table_name": "t"}, None)
+
+    # Only the two well-formed rows deleted; malformed/blank skipped, no raise.
+    assert {"BucketRuleKey": "bucket-a|rule-1", "ObjectKeyVersionId": "key#v1"} in deleted
+    assert {"BucketRuleKey": "bucket-b|rule-2", "ObjectKeyVersionId": "key2#v2"} in deleted
+    assert len(deleted) == 2
+    assert result["statusCode"] == 200
