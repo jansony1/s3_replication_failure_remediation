@@ -591,3 +591,35 @@ def test_missing_source_bucket_fails_loud():
         module.lambda_handler({"SourceBucket": "src-bucket"}, None)   # no rule
     with pytest.raises(ValueError):
         module.lambda_handler({"ReplicationRuleId": "", "SourceBucket": ""}, None)  # empty
+
+
+def test_no_cross_bucket_contamination():
+    """Two buckets share rule 'r'. Querying bucket A returns only A's objects."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+
+    class TwoBucketTable:
+        DATA = {
+            "bucket-a|r": [{"BucketRuleKey": "bucket-a|r",
+                            "ObjectKeyVersionId": "a-obj#v1",
+                            "SRCBucketName": "bucket-a"}],
+            "bucket-b|r": [{"BucketRuleKey": "bucket-b|r",
+                            "ObjectKeyVersionId": "b-obj#v1",
+                            "SRCBucketName": "bucket-b"}],
+        }
+        def query(self, **kwargs):
+            key = kwargs["ExpressionAttributeValues"][":key"]
+            return {"Items": self.DATA.get(key, [])}
+
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(TwoBucketTable()))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    module.lambda_handler({"ReplicationRuleId": "r",
+                           "SourceBucket": "bucket-a"}, None)
+
+    manifest_body = s3.put_object.call_args_list[0].kwargs["Body"]
+    assert "a-obj" in manifest_body
+    assert "b-obj" not in manifest_body          # B never leaks into A's run
+    assert "bucket-b" not in manifest_body
