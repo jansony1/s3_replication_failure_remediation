@@ -339,8 +339,23 @@ Resources:
                       break
               
                   kwargs['ExclusiveStartKey'] = last_key
-                      
-              
+
+
+              # No failures recorded for this bucket+rule: nothing to remediate.
+              # S3 Batch rejects an empty manifest, so no-op instead of creating
+              # a doomed job.
+              if not all_items:
+                  print("No failure records for " + composite_key + "; nothing to do.")
+                  return {
+                      "statusCode": 200,
+                      "job_id": None,
+                      "s3_bucket": csv_bucket,
+                      "account_id": account_id,
+                      "table_name": table_name,
+                      "s3_file_key_to_delete": None,
+                      "body": json.dumps("No failures to remediate for " + composite_key)
+                  }
+
               # Create a CSV file in memory
               csv_file = StringIO()
               writer = csv.writer(csv_file)
@@ -671,7 +686,7 @@ Resources:
                 "Type": "Task",
                 "Resource": "${ProcessAndStartCopyFunction.Arn}",
                 "ResultPath": "$",
-                "Next": "CheckCopyStatus",
+                "Next": "HasJob",
                 "Catch": [
                   {
                     "ErrorEquals": [
@@ -681,6 +696,20 @@ Resources:
                     "Next": "JobFailed"
                   }
                 ]
+              },
+              "HasJob": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.job_id",
+                    "IsNull": true,
+                    "Next": "NothingToRemediate"
+                  }
+                ],
+                "Default": "CheckCopyStatus"
+              },
+              "NothingToRemediate": {
+                "Type": "Succeed"
               },
               "CheckCopyStatus": {
                 "Type": "Task",

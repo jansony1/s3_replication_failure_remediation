@@ -665,3 +665,43 @@ def test_check_status_missing_progress_summary_no_keyerror():
     (which would wrongly route to JobFailed)."""
     result = _run_check_status({"Status": "Preparing"})
     assert result["CopyStatus"] == "ongoing"
+
+
+def test_empty_result_does_not_create_batch_job():
+    """If a bucket+rule has no failure records, the handler must NOT upload an
+    empty manifest or call create_job (S3 Batch rejects an empty manifest).
+    It should no-op."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+
+    class EmptyTable:
+        def query(self, **kwargs):
+            return {"Items": []}
+
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(EmptyTable()))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    result = module.lambda_handler({"ReplicationRuleId": "rule-1",
+                                    "SourceBucket": "src-bucket"}, None)
+
+    s3control.create_job.assert_not_called()
+    s3.put_object.assert_not_called()
+    # Must signal "nothing to do" without a job_id pointing nowhere.
+    assert result.get("job_id") is None
+
+
+def test_state_machine_handles_no_job():
+    """When ProcessAndStartCopy returns no job_id (nothing to remediate), the
+    state machine must reach a terminal SUCCESS path instead of feeding
+    job_id=None into CheckCopyStatus -> describe_job failure -> JobFailed."""
+    asl = get_state_machine_definition(load_template())
+    states = asl["States"]
+    # There must be a Choice that branches on whether a job was created, and a
+    # Succeed state for the no-op case.
+    has_succeed = any(s.get("Type") == "Succeed" for s in states.values())
+    assert has_succeed, "no Succeed state for the nothing-to-remediate case"
+    # job_id must be inspected by a Choice somewhere in the machine.
+    asl_text = json.dumps(asl)
+    assert "job_id" in asl_text, "state machine never inspects job_id"
