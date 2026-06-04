@@ -357,7 +357,7 @@ Resources:
                   object_key, version_id = item.get('ObjectKeyVersionId', '').split('#', 1)
                   row_bucket = item.get('SRCBucketName', '')
                   unique_rows_csv.add((row_bucket, object_key, version_id))
-                  unique_rows_to_delete_csv.add((item.get('ReplicationRuleId', ''), item.get('ObjectKeyVersionId', '')))
+                  unique_rows_to_delete_csv.add((item.get('BucketRuleKey', ''), item.get('ObjectKeyVersionId', '')))
               
              
               # Ingest data to CSV
@@ -572,8 +572,8 @@ Resources:
                   # Read each row in the CSV file
                   for row in reader:
                       item = {
-                          'ReplicationRuleId': row[0],  # Adjust index based on your CSV format
-                          'ObjectKeyVersionId': row[1]  # Adjust index based on your CSV format
+                          'BucketRuleKey': row[0],
+                          'ObjectKeyVersionId': row[1]
                       }
                       all_items.append(item)
               

@@ -518,3 +518,54 @@ def test_csv_object_keys_are_bucket_rule_scoped():
     # both keys must contain the bucket name, not be named by rule alone
     assert all("src-bucket" in k for k in keys), keys
     assert "rule-1.csv" not in keys
+
+
+def test_to_delete_csv_uses_composite_key():
+    """The to_delete CSV first column is BucketRuleKey, not ReplicationRuleId."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    module.lambda_handler({"ReplicationRuleId": "rule-1",
+                           "SourceBucket": "src-bucket"}, None)
+
+    # Second put_object is the to_delete CSV; FakeTable returns
+    # BucketRuleKey "src#bucket|rule-1"
+    to_delete_body = s3.put_object.call_args_list[1].kwargs["Body"]
+    assert "src#bucket|rule-1" in to_delete_body
+
+
+def test_delete_records_uses_composite_key():
+    """DeleteDynamoDBRecords builds its delete Key with BucketRuleKey."""
+    template = load_template()
+    code = get_lambda_code(template, "DeleteDynamoDBRecordsFunction")
+
+    captured = {}
+    class DelTable:
+        def batch_writer(self):
+            class W:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def delete_item(self_, Key): captured.setdefault("keys", []).append(Key)
+            return W()
+
+    class DelResource:
+        def Table(self, n): return DelTable()
+
+    s3 = mock.Mock()
+    s3.get_object.return_value = {
+        "Body": type("B", (), {"read": lambda self: b"bucket-a|rule-1,key#v1\n"})()
+    }
+    fake_boto3 = make_fake_boto3(s3=s3, dynamodb_resource=DelResource())
+    # DeleteDynamoDBRecords uses boto3.client('s3'); make_fake_boto3 maps "s3" -> s3.
+
+    module = exec_lambda_module(code, {}, fake_boto3)
+    module.lambda_handler({"s3_bucket": "csv", "s3_file_key_to_delete": "f",
+                           "table_name": "t"}, None)
+
+    assert captured["keys"][0] == {"BucketRuleKey": "bucket-a|rule-1",
+                                   "ObjectKeyVersionId": "key#v1"}
