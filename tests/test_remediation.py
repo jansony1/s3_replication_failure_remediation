@@ -281,7 +281,7 @@ def test_happy_path_returns_job_id_for_downstream():
     assert result["s3_bucket"] == "b"
     assert result["account_id"] == "111111111111"
     assert result["table_name"] == "t"
-    assert result["s3_file_key_to_delete"] == "rule-1_delete.csv"
+    assert result["s3_file_key_to_delete"] == "src__rule-1_delete.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +477,44 @@ def test_projection_includes_required_fields():
     proj = table.last_query_kwargs["ProjectionExpression"]
     for field in ("BucketRuleKey", "ObjectKeyVersionId", "SRCBucketName"):
         assert field in proj
+
+
+def test_csv_uses_stored_source_bucket():
+    """Data manifest rows are stamped with the record's SRCBucketName, not the
+    execution-time SourceBucket."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    # Pass a DIFFERENT execution SourceBucket than the record's SRCBucketName
+    module.lambda_handler({"ReplicationRuleId": "rule-1",
+                           "SourceBucket": "wrong-bucket"}, None)
+
+    # First put_object is the data manifest CSV
+    body = s3.put_object.call_args_list[0].kwargs["Body"]
+    assert "src-bucket" in body         # the record's stored SRCBucketName
+    assert "wrong-bucket" not in body   # NOT the execution input
+
+
+def test_csv_object_keys_are_bucket_rule_scoped():
+    """Manifest and delete-list S3 object keys include the bucket so two buckets
+    sharing a rule ID don't overwrite each other."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    module.lambda_handler({"ReplicationRuleId": "rule-1",
+                           "SourceBucket": "src-bucket"}, None)
+
+    keys = [c.kwargs["Key"] for c in s3.put_object.call_args_list]
+    # both keys must contain the bucket name, not be named by rule alone
+    assert all("src-bucket" in k for k in keys), keys
+    assert "rule-1.csv" not in keys

@@ -355,7 +355,8 @@ Resources:
               # Write the data rows
               for item in all_items:
                   object_key, version_id = item.get('ObjectKeyVersionId', '').split('#', 1)
-                  unique_rows_csv.add((src_bucket, object_key, version_id))
+                  row_bucket = item.get('SRCBucketName', '')
+                  unique_rows_csv.add((row_bucket, object_key, version_id))
                   unique_rows_to_delete_csv.add((item.get('ReplicationRuleId', ''), item.get('ObjectKeyVersionId', '')))
               
              
@@ -371,11 +372,11 @@ Resources:
               csv_file.seek(0)  
               to_delete_csv.seek(0)
               
-              # Define the S3 bucket and the file name where the CSV will be stored
-              s3_file_key = replication_rule + ".csv"
-
-              # Define the S3 bucket and the file name where the CSV will be used for DDB deletion
-              s3_file_key_to_delete = replication_rule +"_delete"+".csv"
+              # Filename-safe composite scope so two buckets sharing a rule id
+              # do not overwrite each other's manifests.
+              file_scope = src_bucket + "__" + replication_rule
+              s3_file_key = file_scope + ".csv"
+              s3_file_key_to_delete = file_scope + "_delete.csv"
               
               # Upload both CSVs; on failure, let the exception propagate so the
               # Step Functions Catch routes the execution to JobFailed.
