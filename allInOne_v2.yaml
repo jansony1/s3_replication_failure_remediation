@@ -136,9 +136,10 @@ Resources:
                   
                   # Create an item to insert into DynamoDB
                   item = {
-                      'ReplicationRuleId': replication_rule_id,
+                      'BucketRuleKey': src_bucket_name + '|' + replication_rule_id,
                       'ObjectKeyVersionId': object_key_with_version,
                       'SRCBucketName': src_bucket_name,
+                      'ReplicationRuleId': replication_rule_id,
                       'DSTBucketName' : dst_bucket_name,
                       'FailureReason': failure_reason
                   }

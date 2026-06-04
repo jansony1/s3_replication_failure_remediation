@@ -410,3 +410,32 @@ def test_attribute_definitions_match_key_schema():
     assert "ReplicationRuleId" not in attr_names
     assert "BucketRuleKey" in attr_names
     assert attr_names == key_names
+
+
+def test_ingestion_writes_composite_key():
+    """Ingestion stores HASH key 'SRCBucket|ReplicationRuleId' and keeps
+    SRCBucketName + ReplicationRuleId as attributes."""
+    template = load_template()
+    code = get_lambda_code(template, "FailureIngestionLambda")
+
+    table = FakeTable()
+    fake_boto3 = make_fake_boto3(dynamodb_resource=FakeDDBResource(table))
+
+    s3_event = {
+        "s3": {"bucket": {"name": "bucket-a"},
+               "object": {"key": "path/obj.txt", "versionId": "v1",
+                          "size": 10, "eTag": "etag"}},
+        "replicationEventData": {"replicationRuleId": "rule-x",
+                                 "failureReason": "DstPutObjectNotPermitted",
+                                 "destinationBucket": "arn:aws:s3:::bucket-b"},
+    }
+    sqs_event = {"Records": [{"body": json.dumps({"Records": [s3_event]})}]}
+
+    module = exec_lambda_module(code, {"table_name": "t"}, fake_boto3)
+    module.lambda_handler(sqs_event, None)
+
+    assert len(table.put_items) == 1
+    item = table.put_items[0]
+    assert item["BucketRuleKey"] == "bucket-a|rule-x"
+    assert item["SRCBucketName"] == "bucket-a"
+    assert item["ReplicationRuleId"] == "rule-x"
