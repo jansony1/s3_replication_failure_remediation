@@ -71,12 +71,12 @@ Resources:
       TableName: !Ref DDBTable
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: 'ReplicationRuleId'
+        - AttributeName: 'BucketRuleKey'
           AttributeType: 'S'
         - AttributeName: 'ObjectKeyVersionId'
           AttributeType: 'S'
       KeySchema:
-        - AttributeName: 'ReplicationRuleId'
+        - AttributeName: 'BucketRuleKey'
           KeyType: 'HASH'
         - AttributeName: 'ObjectKeyVersionId'
           KeyType: 'RANGE'

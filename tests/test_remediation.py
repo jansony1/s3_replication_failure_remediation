@@ -390,3 +390,23 @@ def test_source_bucket_parameter_and_conditional_wiring():
         for res in resources.values()
     )
     assert has_custom, "no custom resource to configure bucket notification"
+
+
+# ---------------------------------------------------------------------------
+# T11: table schema migration to composite BucketRuleKey
+# ---------------------------------------------------------------------------
+
+def test_attribute_definitions_match_key_schema():
+    """Table HASH key is BucketRuleKey; old ReplicationRuleId is gone from
+    AttributeDefinitions (DynamoDB rejects unused attribute definitions)."""
+    t = load_template()
+    props = t["Resources"]["S3ReplicationFailureTable"]["Properties"]
+    attr_names = {a["AttributeName"] for a in props["AttributeDefinitions"]}
+    key_names = {k["AttributeName"] for k in props["KeySchema"]}
+    hash_key = [k["AttributeName"] for k in props["KeySchema"]
+                if k["KeyType"] == "HASH"][0]
+
+    assert hash_key == "BucketRuleKey"
+    assert "ReplicationRuleId" not in attr_names
+    assert "BucketRuleKey" in attr_names
+    assert attr_names == key_names
