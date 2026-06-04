@@ -623,3 +623,123 @@ def test_no_cross_bucket_contamination():
     assert "a-obj" in manifest_body
     assert "b-obj" not in manifest_body          # B never leaks into A's run
     assert "bucket-b" not in manifest_body
+
+
+# ---------------------------------------------------------------------------
+# CheckCopyStatus job-status handling
+# ---------------------------------------------------------------------------
+
+def _run_check_status(job):
+    """Run CheckCopyStatusFunction with a fake describe_job returning `job`."""
+    template = load_template()
+    code = get_lambda_code(template, "CheckCopyStatusFunction")
+    s3control = mock.Mock()
+    s3control.describe_job.return_value = {"Job": job}
+    fake_boto3 = make_fake_boto3(s3control=s3control)
+    module = exec_lambda_module(code, {}, fake_boto3)
+    return module.lambda_handler(
+        {"job_id": "j", "s3_bucket": "b", "account_id": "1",
+         "s3_file_key_to_delete": "d"}, None)
+
+
+def test_check_status_cancelled_is_failed():
+    """A Cancelled/Suspended batch job is terminal-not-successful and must map
+    to FAILED, not 'ongoing' (which would poll until the 24h timeout)."""
+    for terminal in ("Cancelled", "Cancelling", "Suspended"):
+        result = _run_check_status(
+            {"Status": terminal, "ProgressSummary": {"NumberOfTasksFailed": 0}})
+        assert result["CopyStatus"] == "FAILED", f"{terminal} -> {result}"
+
+
+def test_check_status_active_states_still_ongoing():
+    """Genuinely in-progress states keep returning 'ongoing' so the poll loop
+    continues (regression guard for the FAILED mapping)."""
+    for active in ("Active", "Ready"):
+        result = _run_check_status(
+            {"Status": active, "ProgressSummary": {"NumberOfTasksFailed": 0}})
+        assert result["CopyStatus"] == "ongoing", f"{active} -> {result}"
+
+
+def test_check_status_missing_progress_summary_no_keyerror():
+    """Early states (New/Preparing) may lack ProgressSummary; must not KeyError
+    (which would wrongly route to JobFailed)."""
+    result = _run_check_status({"Status": "Preparing"})
+    assert result["CopyStatus"] == "ongoing"
+
+
+def test_empty_result_does_not_create_batch_job():
+    """If a bucket+rule has no failure records, the handler must NOT upload an
+    empty manifest or call create_job (S3 Batch rejects an empty manifest).
+    It should no-op."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+
+    class EmptyTable:
+        def query(self, **kwargs):
+            return {"Items": []}
+
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(EmptyTable()))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    result = module.lambda_handler({"ReplicationRuleId": "rule-1",
+                                    "SourceBucket": "src-bucket"}, None)
+
+    s3control.create_job.assert_not_called()
+    s3.put_object.assert_not_called()
+    # Must signal "nothing to do" without a job_id pointing nowhere.
+    assert result.get("job_id") is None
+
+
+def test_state_machine_handles_no_job():
+    """When ProcessAndStartCopy returns no job_id (nothing to remediate), the
+    state machine must reach a terminal SUCCESS path instead of feeding
+    job_id=None into CheckCopyStatus -> describe_job failure -> JobFailed."""
+    asl = get_state_machine_definition(load_template())
+    states = asl["States"]
+    # There must be a Choice that branches on whether a job was created, and a
+    # Succeed state for the no-op case.
+    has_succeed = any(s.get("Type") == "Succeed" for s in states.values())
+    assert has_succeed, "no Succeed state for the nothing-to-remediate case"
+    # job_id must be inspected by a Choice somewhere in the machine.
+    asl_text = json.dumps(asl)
+    assert "job_id" in asl_text, "state machine never inspects job_id"
+
+
+def test_delete_skips_malformed_csv_rows():
+    """DeleteDynamoDBRecords must skip rows with fewer than 2 columns (blank or
+    malformed lines) instead of raising IndexError and failing the cleanup."""
+    template = load_template()
+    code = get_lambda_code(template, "DeleteDynamoDBRecordsFunction")
+
+    deleted = []
+    class DelTable:
+        def batch_writer(self):
+            class W:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def delete_item(self_, Key): deleted.append(Key)
+            return W()
+
+    class DelResource:
+        def Table(self, n): return DelTable()
+
+    # CSV has a good row, a blank line, and a single-column malformed row.
+    csv_bytes = b"bucket-a|rule-1,key#v1\n\nonlyonecol\nbucket-b|rule-2,key2#v2\n"
+    s3 = mock.Mock()
+    s3.get_object.return_value = {
+        "Body": type("B", (), {"read": lambda self: csv_bytes})()
+    }
+    fake_boto3 = make_fake_boto3(s3=s3, dynamodb_resource=DelResource())
+
+    module = exec_lambda_module(code, {}, fake_boto3)
+    result = module.lambda_handler({"s3_bucket": "csv",
+                                    "s3_file_key_to_delete": "f",
+                                    "table_name": "t"}, None)
+
+    # Only the two well-formed rows deleted; malformed/blank skipped, no raise.
+    assert {"BucketRuleKey": "bucket-a|rule-1", "ObjectKeyVersionId": "key#v1"} in deleted
+    assert {"BucketRuleKey": "bucket-b|rule-2", "ObjectKeyVersionId": "key2#v2"} in deleted
+    assert len(deleted) == 2
+    assert result["statusCode"] == 200

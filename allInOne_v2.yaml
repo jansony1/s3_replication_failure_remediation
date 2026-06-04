@@ -339,8 +339,23 @@ Resources:
                       break
               
                   kwargs['ExclusiveStartKey'] = last_key
-                      
-              
+
+
+              # No failures recorded for this bucket+rule: nothing to remediate.
+              # S3 Batch rejects an empty manifest, so no-op instead of creating
+              # a doomed job.
+              if not all_items:
+                  print("No failure records for " + composite_key + "; nothing to do.")
+                  return {
+                      "statusCode": 200,
+                      "job_id": None,
+                      "s3_bucket": csv_bucket,
+                      "account_id": account_id,
+                      "table_name": table_name,
+                      "s3_file_key_to_delete": None,
+                      "body": json.dumps("No failures to remediate for " + composite_key)
+                  }
+
               # Create a CSV file in memory
               csv_file = StringIO()
               writer = csv.writer(csv_file)
@@ -481,15 +496,20 @@ Resources:
                   JobId=job_id
               )
 
-              # Extract status and number of failed tasks
+              # Extract status and number of failed tasks. ProgressSummary may be
+              # absent for early states (New/Preparing), so default safely.
               status = job_response['Job']['Status']
-              failed_task = job_response['Job']['ProgressSummary']['NumberOfTasksFailed']
+              progress = job_response['Job'].get('ProgressSummary') or {}
+              failed_task = progress.get('NumberOfTasksFailed', 0)
+
+              # Terminal job states that are not a clean success.
+              terminal_failed = ('Failed', 'Cancelled', 'Cancelling', 'Suspended')
 
               # Determine the job status
               if status == 'Complete' and failed_task == 0:
                   job_status = 'SUCCEEDED'
-              elif status == 'Failed' or failed_task != 0:
-                  job_status = 'FAILED' 
+              elif status in terminal_failed or failed_task != 0:
+                  job_status = 'FAILED'
               else:
                   print("Job is still processing. Current status: " + status)
                   job_status = 'ongoing'
@@ -574,6 +594,10 @@ Resources:
 
                   # Read each row in the CSV file
                   for row in reader:
+                      # Skip blank/malformed rows (need both key columns).
+                      if len(row) < 2:
+                          print("Skipping malformed delete row: " + str(row))
+                          continue
                       item = {
                           'BucketRuleKey': row[0],
                           'ObjectKeyVersionId': row[1]
@@ -666,7 +690,7 @@ Resources:
                 "Type": "Task",
                 "Resource": "${ProcessAndStartCopyFunction.Arn}",
                 "ResultPath": "$",
-                "Next": "CheckCopyStatus",
+                "Next": "HasJob",
                 "Catch": [
                   {
                     "ErrorEquals": [
@@ -676,6 +700,20 @@ Resources:
                     "Next": "JobFailed"
                   }
                 ]
+              },
+              "HasJob": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.job_id",
+                    "IsNull": true,
+                    "Next": "NothingToRemediate"
+                  }
+                ],
+                "Default": "CheckCopyStatus"
+              },
+              "NothingToRemediate": {
+                "Type": "Succeed"
               },
               "CheckCopyStatus": {
                 "Type": "Task",
