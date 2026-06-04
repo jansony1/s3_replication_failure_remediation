@@ -5,6 +5,18 @@ Amazon S3 users often configure S3 replication rules for data redundancy in Disa
 
 This site details the remediation process for handling Amazon S3 replication failure events and subsequent batch replication 
 
+## Why this project
+
+S3 Batch Replication can already re-replicate objects, so why build this? Because the hard part is not *running* the batch job — it is knowing **exactly which objects failed** and **why**, cheaply and in real time. This solution exists for two concrete reasons:
+
+1. **An auditable, queryable record of every failure.** Failure events are captured in real time (S3 → SQS → DynamoDB) together with the failure reason, source/destination bucket, and replication rule. You can query "what failed, and why" per `ReplicationRuleId` at any time. A batch job is an executor; it keeps no such ledger.
+
+2. **Avoiding a full-bucket scan on large buckets.** Without this ledger, finding the objects to re-replicate means either an S3 Inventory report (T+1 latency) or scanning the whole bucket — both slow and costly on large buckets, where you pay to inspect every object just to find the few that failed. This solution drives the batch job from a precise list whose size is `O(number of failures)`, not `O(objects in bucket)`.
+
+In short: **this solution = a real-time failure ledger (the unique value) + the standard Batch Replication executor.** The ledger is the part S3 does not give you out of the box.
+
+> Note on the newer S3 Batch Operations "generate object list by specifying filters" option: it filters by attributes such as creation/modification time, prefix, size, and storage class — not by *replication status* — so it does not replace the ledger. The closest native alternative is "generate based on replication configuration", but that re-introduces the full-bucket scan (and its cost/latency) and still has no failure-reason history. For small buckets or low failure rates, the native option may be simpler; for large buckets or when failure auditing matters, this solution's precise ledger remains the better fit.
+
 ## Architecture Introduction
 
 The architecture comprises two parts: 1. Capturing and storing failure events (Red), and 2. Querying failures based on replication rule and handling batch replication for remediation (Blue).
@@ -45,6 +57,7 @@ In the optimized architecture, we utilized AWS Step Functions to:
 * Install latest [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 * Have an S3 Bucket for temporary file storage. It will be used as <YourCSVBucket>
 * Ensure sufficient permissions for CloudFormation deployment, Step Functions invocation, and S3 Event configuration
+* **The source bucket's replication rule MUST have `Replication metrics` enabled.** This is a hard requirement, not optional. The `s3:Replication:OperationFailedReplication` event — the trigger for this entire solution's ingestion path — is only emitted by S3 when the rule has Replication metrics turned on. Without it, a failed object's `ReplicationStatus` still becomes `FAILED`, but **no event is ever sent**, so the SQS queue and DynamoDB table stay empty and the solution does nothing. (RTC / S3 Replication Time Control also works, because enabling RTC forces metrics on — but RTC itself is *not* required; plain metrics is enough. Note: a `Metrics` block may only contain an `EventThreshold` when RTC is also enabled.)
 
 
 ### Deploy the stack
@@ -136,8 +149,20 @@ aws stepfunctions start-execution \
 
 This solution ensures replication failures are efficiently managed, maintaining data consistency across S3 buckets. The focus is on automation, monitoring, and the reliability of the replication process
 
+## Current limitations
+
+Known constraints to be aware of before adopting this solution:
+
+1. **Single region per stack.** S3 → SQS notifications cannot cross regions, and an S3 Batch Operations job must run in the same region as its source objects. A bidirectional (DR) setup therefore needs **one stack deployed per region** — the same template, deployed with a different `--region`. One stack cannot cover both directions.
+
+2. **Single account.** All resources (SQS, DynamoDB, Lambdas, Step Functions, batch job role) live in one account, driven by a single `AccountId` parameter. Cross-account replication remediation is not handled.
+
+3. **`ReplicationRuleId` collision across buckets.** The DynamoDB partition key is `ReplicationRuleId` alone, and the remediation CSV stamps every object with the `SourceBucket` passed at execution time (not the `SRCBucketName` stored on the record). If two different source buckets share the same replication rule ID, their failures land in the same partition and a remediation run can mix objects from the wrong bucket. Use S3-generated (unique) rule IDs, or deploy a separate stack per bucket group, until a composite key (`SRCBucket#ReplicationRuleId`) is adopted.
+
+4. **No central registry of monitored buckets.** "Which buckets feed this queue" is configured on each source bucket's notification, not in the stack. There is no built-in list of what is currently monitored — you must enumerate buckets to find out. Adding/removing a monitored bucket is done via `put-bucket-notification-configuration`, independent of the stack.
+
+5. **Manual trigger by design.** Remediation is not automatic. The ingestion side records failures automatically, but you must start the Step Functions execution yourself (specifying the `ReplicationRuleId`). This is intentional — you should fix the root cause first, otherwise a re-run just fails again — but it means there is no auto-remediation on a threshold.
+
 ## Next Action
 1. More experiements to measure the end-to-end time consumption in relation to different counts of failure event
-
-2. Step function may hung in execution with no errors due to failed object was already recorded in DynamoDB and the corresponding data in the original bucket was deleted before remediation kick start. 
 
