@@ -115,11 +115,13 @@ class FakeTable:
         self.put_items = []
 
     def query(self, **kwargs):
+        self.last_query_kwargs = kwargs
         return {
             "Items": [
                 {
-                    "ReplicationRuleId": "rule-1",
+                    "BucketRuleKey": "src#bucket|rule-1",
                     "ObjectKeyVersionId": "some/key.txt#v123",
+                    "SRCBucketName": "src-bucket",
                 }
             ]
         }
@@ -439,3 +441,39 @@ def test_ingestion_writes_composite_key():
     assert item["BucketRuleKey"] == "bucket-a|rule-x"
     assert item["SRCBucketName"] == "bucket-a"
     assert item["ReplicationRuleId"] == "rule-x"
+
+
+def test_query_uses_composite_key():
+    """Remediation queries by BucketRuleKey = 'SourceBucket|ReplicationRuleId'."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    module.lambda_handler({"ReplicationRuleId": "rule-1",
+                           "SourceBucket": "src-bucket"}, None)
+
+    kw = table.last_query_kwargs
+    assert kw["KeyConditionExpression"] == "BucketRuleKey = :key"
+    assert kw["ExpressionAttributeValues"][":key"] == "src-bucket|rule-1"
+
+
+def test_projection_includes_required_fields():
+    """Projection must include BucketRuleKey, ObjectKeyVersionId, SRCBucketName."""
+    template = load_template()
+    code = get_lambda_code(template, "ProcessAndStartCopyFunction")
+    table = FakeTable()
+    s3 = mock.Mock(); s3.put_object.return_value = {"ETag": '"e"'}
+    s3control = mock.Mock(); s3control.create_job.return_value = {"JobId": "j"}
+    fake_boto3 = make_fake_boto3(s3=s3, s3control=s3control,
+                                 dynamodb_resource=FakeDDBResource(table))
+    module = exec_lambda_module(code, PROCESS_ENV, fake_boto3)
+    module.lambda_handler({"ReplicationRuleId": "rule-1",
+                           "SourceBucket": "src-bucket"}, None)
+
+    proj = table.last_query_kwargs["ProjectionExpression"]
+    for field in ("BucketRuleKey", "ObjectKeyVersionId", "SRCBucketName"):
+        assert field in proj

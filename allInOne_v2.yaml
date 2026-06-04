@@ -308,11 +308,12 @@ Resources:
               all_items = []
               
 
-              # Query the table
+              # Query the table by composite key
+              composite_key = src_bucket + '|' + replication_rule
               kwargs = {
-                  'KeyConditionExpression': 'ReplicationRuleId = :id',
-                  'ExpressionAttributeValues': {':id': replication_rule},
-                  'ProjectionExpression': 'ReplicationRuleId, ObjectKeyVersionId'
+                  'KeyConditionExpression': 'BucketRuleKey = :key',
+                  'ExpressionAttributeValues': {':key': composite_key},
+                  'ProjectionExpression': 'BucketRuleKey, ObjectKeyVersionId, SRCBucketName'
               }
               
               while True:
